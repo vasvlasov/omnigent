@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shlex
 import sys
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from typing import NotRequired, TypedDict
 
@@ -348,6 +350,79 @@ def hook_payload_to_evaluation_request(
             },
         }
     return None
+
+
+# ── GitHub freshness signal ───────────────────────────────────────────
+#
+# Separate from policy: a ``PostToolUse`` shell command that pushes to a remote
+# or mutates a PR should nudge the web to refetch the session's GitHub context
+# (PR / branch / CI). The pattern is broad rather than precise — a false
+# positive only costs one throttled refetch — but gated to remote-affecting ops
+# so ordinary ``git status`` / ``git diff`` don't fire it. ``gh pr create`` is
+# matched directly, so a push-then-create sequence needs no race handling.
+_GITHUB_ACTIVITY_RE = re.compile(
+    r"\bgit\b[^\n]{0,120}?\bpush\b|\bgh\s+pr\s+(?:create|edit|ready|merge|close|reopen)\b",
+    re.IGNORECASE,
+)
+
+# Best-effort: the git command already ran, so the signal must never block the
+# hook. A short timeout keeps a sick server from stalling the harness's next step.
+_GITHUB_SIGNAL_TIMEOUT_S = 2.0
+
+
+def command_touches_github_remote(command: str) -> bool:
+    """Return ``True`` when a shell command pushes to a remote or mutates a PR.
+
+    Decides whether a shell command should trigger a GitHub refetch. Broad by
+    design (see :data:`_GITHUB_ACTIVITY_RE`).
+    """
+    return bool(_GITHUB_ACTIVITY_RE.search(command))
+
+
+def github_activity_matched(payload: Mapping[str, object]) -> bool:
+    """Return ``True`` for a ``PostToolUse`` shell command that changed GitHub.
+
+    Only the result phase is considered — the command has run, so its effect on
+    the remote / PR is real. Reads the command from the payload's
+    ``tool_input.command`` (the field both Claude and Codex use for shell tools);
+    non-shell tools carry no command and never match.
+    """
+    if payload.get("hook_event_name") != _POST_TOOL_USE:
+        return False
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return False
+    command = tool_input.get("command")
+    return isinstance(command, str) and command_touches_github_remote(command)
+
+
+def post_github_activity_signal(
+    server_url: str,
+    headers: Mapping[str, str],
+    session_id: str,
+) -> None:
+    """Best-effort POST to the session's GitHub-activity hook route.
+
+    Tells the Omnigent server to publish a coarse ``session.github.invalidated``
+    so the web refetches the PR / branch / CI. Every error is swallowed: the git
+    command has already run and this is only a UI freshness hint (the panel's own
+    poll or a later event catches up). Never raises.
+
+    :param server_url: Omnigent server base URL, e.g. ``"https://…"``.
+    :param headers: Auth + routing headers for the server (the same set the
+        policy hook posts with).
+    :param session_id: Session / conversation id.
+    """
+    url = (
+        f"{server_url.rstrip('/')}"
+        f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/hooks/github-activity"
+    )
+    try:
+        with httpx.Client(timeout=_GITHUB_SIGNAL_TIMEOUT_S) as client:
+            client.post(url, headers={**headers, "Content-Type": "application/json"}, json={})
+    except httpx.HTTPError:
+        # UI freshness hint only — a failed nudge is not worth surfacing.
+        pass
 
 
 def evaluation_response_to_hook_output(

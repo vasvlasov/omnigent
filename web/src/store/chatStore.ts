@@ -1013,6 +1013,7 @@ function enterSendChain(conversationId: string | null): {
 }
 let flashTimer: ReturnType<typeof setTimeout> | null = null;
 const workspaceInvalidationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const githubInvalidationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // Background-flush throttle, kept OUT of store state so it can't re-trigger the
 // queue effect. A conversation currently mid-POST (inFlight) or in its
@@ -1176,6 +1177,10 @@ export function initChatStore(client: QueryClient): void {
     clearTimeout(timer);
   }
   workspaceInvalidationTimers.clear();
+  for (const timer of githubInvalidationTimers.values()) {
+    clearTimeout(timer);
+  }
+  githubInvalidationTimers.clear();
   backgroundFlushInFlight.clear();
   backgroundFlushCooldownUntil.clear();
   stickyApplyBackoffUntil = 0;
@@ -1221,6 +1226,26 @@ function scheduleWorkspaceFilesystemInvalidation(sessionId: string): void {
     });
   }, WORKSPACE_INVALIDATION_DEBOUNCE_MS);
   workspaceInvalidationTimers.set(sessionId, timer);
+}
+
+function scheduleGithubInfoInvalidation(sessionId: string): void {
+  if (githubInvalidationTimers.has(sessionId)) return;
+  const timer = setTimeout(() => {
+    githubInvalidationTimers.delete(sessionId);
+    // The always-mounted status line observes ["github-info"], so it refetches
+    // immediately; the changed-files/pr-diff keys only have an observer when the
+    // GitHub panel is open, so those are marked stale and refetch on next view.
+    queryClient?.invalidateQueries({
+      queryKey: ["github-info", sessionId],
+    });
+    queryClient?.invalidateQueries({
+      queryKey: ["github-changed-files", sessionId],
+    });
+    queryClient?.invalidateQueries({
+      queryKey: ["github-pr-diff", sessionId],
+    });
+  }, WORKSPACE_INVALIDATION_DEBOUNCE_MS);
+  githubInvalidationTimers.set(sessionId, timer);
 }
 
 /**
@@ -5869,6 +5894,12 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // changed-files/root refresh, and mark expanded directory caches
       // stale without immediately refetching every visible folder.
       scheduleWorkspaceFilesystemInvalidation(event.sessionId);
+      return;
+    case "session_github_invalidated":
+      // The agent pushed or mutated a PR (git push / gh pr …). Refetch the
+      // GitHub context so the status-line PR indicator and the panel reflect
+      // it without a manual refresh; coalesced like the changed-files signal.
+      scheduleGithubInfoInvalidation(event.sessionId);
       return;
     case "session_terminal_activity":
       // Runner-determined PTY-output pulse — drives the "active" badge

@@ -13,6 +13,7 @@ import type {
   SessionAgentChangedEvent,
   SessionCollaborationModeEvent,
   SessionChangedFilesInvalidatedEvent,
+  SessionGithubInvalidatedEvent,
   SessionChildSessionUpdatedEvent,
   SessionModelOptionsEvent,
   SessionCreatedEvent,
@@ -1644,6 +1645,27 @@ describe("session.changed_files.invalidated (FLAT envelope)", () => {
     expect(
       parse("session.changed_files.invalidated", {
         type: "session.changed_files.invalidated",
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("session.github.invalidated (FLAT envelope)", () => {
+  it("lifts session id", () => {
+    const out = parse("session.github.invalidated", {
+      type: "session.github.invalidated",
+      session_id: "conv_abc",
+    });
+    expect(out).toHaveLength(1);
+    const ev = out[0] as SessionGithubInvalidatedEvent;
+    expect(ev.type).toBe("session_github_invalidated");
+    expect(ev.sessionId).toBe("conv_abc");
+  });
+
+  it("rejects when session_id is absent", () => {
+    expect(
+      parse("session.github.invalidated", {
+        type: "session.github.invalidated",
       }),
     ).toEqual([]);
   });

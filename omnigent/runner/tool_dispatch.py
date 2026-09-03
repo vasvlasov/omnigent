@@ -6279,6 +6279,78 @@ def _maybe_signal_changed_files(
     )
 
 
+# Per-session leading-edge throttle for GitHub-context invalidation, kept
+# separate from the changed-files throttle: a ``git push`` need not touch the
+# working tree, so it wouldn't fire the changed-files signal. Coarse and
+# coalesced client-side, backstopped by the panel's own poll.
+_GITHUB_ACTIVITY_SIGNAL_THROTTLE_S = 3.0
+_github_activity_last_signal: dict[str, float] = {}
+# Only the shell tool can push / mutate a PR (``git push`` / ``gh pr …``);
+# write/edit merely touch the working tree.
+_GITHUB_ACTIVITY_TOOLS = frozenset({SysOsShellTool.name()})
+
+
+def _shell_command_from_arguments(arguments: str) -> str | None:
+    """Extract the ``command`` string from a ``sys_os_shell`` tool's JSON args.
+
+    Returns ``None`` when the arguments aren't the expected shape (parse error,
+    or a missing / wrongly-typed ``command`` field).
+    """
+    try:
+        parsed = json.loads(arguments)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    command = parsed.get("command")
+    return command if isinstance(command, str) else None
+
+
+def _maybe_signal_github_activity(
+    conversation_id: str | None,
+    arguments: str,
+    publish_event: Callable[[str, _JsonObject], None] | None,
+    *,
+    now: float,
+) -> None:
+    """Publish a throttled ``session.github.invalidated`` after a git push / gh pr.
+
+    Fires only when a ``sys_os_shell`` command pushed to a remote or mutated a
+    PR (see :func:`omnigent.native_policy_hook.command_touches_github_remote`),
+    so the web refetches the session's GitHub context (PR / branch / CI) without
+    waiting on the panel's poll. Leading-edge throttle keyed by session.
+
+    :param conversation_id: Session id, or ``None`` (no-op).
+    :param arguments: Raw JSON arguments the shell tool ran with.
+    :param publish_event: Per-session SSE emitter, or ``None`` (no-op).
+    :param now: Monotonic timestamp, e.g. ``loop.time()``.
+    """
+    if conversation_id is None or publish_event is None:
+        return
+    command = _shell_command_from_arguments(arguments)
+    if not command:
+        return
+    # Lazy import: the dependency-light matcher lives with the native hooks, and
+    # only shell tools reach here, so the import cost stays off the hot path.
+    from omnigent.native_policy_hook import command_touches_github_remote
+
+    if not command_touches_github_remote(command):
+        return
+    last = _github_activity_last_signal.get(conversation_id, 0.0)
+    if now - last < _GITHUB_ACTIVITY_SIGNAL_THROTTLE_S:
+        return
+    if len(_github_activity_last_signal) > _CHANGED_FILES_SIGNAL_MAX_TRACKED:
+        _github_activity_last_signal.clear()
+    _github_activity_last_signal[conversation_id] = now
+    publish_event(
+        conversation_id,
+        {
+            "type": "session.github.invalidated",
+            "session_id": conversation_id,
+        },
+    )
+
+
 async def dispatch_tool_locally(
     *,
     tool_name: str,
@@ -6348,6 +6420,15 @@ async def dispatch_tool_locally(
     if tool_name in _CHANGED_FILES_TOOLS:
         _maybe_signal_changed_files(
             conversation_id,
+            publish_event,
+            now=asyncio.get_running_loop().time(),
+        )
+    # A shell command may have pushed or mutated a PR — nudge the web to refetch
+    # GitHub info (throttled; only fires on git push / gh pr commands).
+    if tool_name in _GITHUB_ACTIVITY_TOOLS:
+        _maybe_signal_github_activity(
+            conversation_id,
+            arguments,
             publish_event,
             now=asyncio.get_running_loop().time(),
         )

@@ -26,9 +26,11 @@ from omnigent.codex_native_bridge import (
 from omnigent.native_policy_hook import (
     evaluation_response_to_hook_output,
     fail_closed_hook_output,
+    github_activity_matched,
     hook_payload_to_evaluation_request,
     policy_hook_reauth,
     post_evaluate_with_retry,
+    post_github_activity_signal,
     read_relay_policy_config,
     relay_policy_evaluate_url,
 )
@@ -120,6 +122,19 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     if state is None:
         return 0
     session_id = state.session_id
+
+    # Nudge the web to refetch GitHub info when the agent pushes or mutates a PR.
+    # Independent of the policy verdict below and best-effort (the git command
+    # has already run), so it never blocks or fails the hook.
+    if github_activity_matched(payload):
+        gh_config = read_policy_hook_config(bridge_dir)
+        gh_server = gh_config.get("ap_server_url") if gh_config is not None else None
+        if isinstance(gh_server, str) and gh_server:
+            gh_headers: dict[str, str] = {}
+            gh_raw_headers = gh_config.get("ap_auth_headers") if gh_config is not None else None
+            if isinstance(gh_raw_headers, dict):
+                gh_headers = {str(k): str(v) for k, v in gh_raw_headers.items()}
+            post_github_activity_signal(gh_server, gh_headers, session_id)
 
     hook_event = payload.get("hook_event_name", "")
     eval_request = hook_payload_to_evaluation_request(hook_event, payload)

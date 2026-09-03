@@ -161,6 +161,56 @@ async def test_an_editing_grantee_still_reaches_a_routing_relay(
     assert resp.json()["action"] == "allow"
 
 
+async def test_github_activity_signal_publishes_and_needs_only_read(
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The github-activity hook publishes an invalidation and needs only read.
+
+    Unlike the routing relays (which repin ``model_override``), this route is a
+    read-only UI freshness nudge — a LEVEL_READ grantee may trigger it. It
+    publishes a coarse ``session.github.invalidated`` and throttles a burst to a
+    single event.
+    """
+    published: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "omnigent.runtime.session_stream.publish",
+        lambda session_id, event: published.append((session_id, event)),
+    )
+    # Fresh throttle state so this session's first POST always publishes.
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.routes_hooks._github_activity_last_signal",
+        {},
+    )
+    session_id = _session_with_grants(db_uri)
+
+    def _github_events() -> list[dict[str, object]]:
+        return [
+            ev
+            for sid, ev in published
+            if sid == session_id and ev.get("type") == "session.github.invalidated"
+        ]
+
+    # A read-only grantee may trigger the refetch nudge.
+    resp = await auth_client.post(
+        f"/v1/sessions/{session_id}/hooks/github-activity",
+        json={},
+        headers={"X-Forwarded-Email": READER},
+    )
+    assert resp.status_code == 204, resp.text
+    assert _github_events() == [{"type": "session.github.invalidated", "session_id": session_id}]
+
+    # A second POST inside the throttle window coalesces — no duplicate event.
+    resp2 = await auth_client.post(
+        f"/v1/sessions/{session_id}/hooks/github-activity",
+        json={},
+        headers={"X-Forwarded-Email": READER},
+    )
+    assert resp2.status_code == 204, resp2.text
+    assert len(_github_events()) == 1, "a rapid second call must be throttled"
+
+
 async def test_the_route_turn_relay_keeps_the_rationale_off_info(
     auth_client: httpx.AsyncClient,
     db_uri: str,

@@ -1232,6 +1232,113 @@ def test_evaluate_policy_pre_tool_use_converts_and_returns_deny(
     assert captured.err == ""
 
 
+def _install_allow_policy_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the policy httpx client so evaluate-policy returns a clean ALLOW.
+
+    Lets a PostToolUse hook run to completion without a real server, so a test
+    can focus on the side-effect (the GitHub-activity signal) rather than the
+    verdict.
+    """
+
+    class _AllowClient:
+        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+            del headers, timeout
+
+        def __enter__(self) -> _AllowClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def post(self, url: str, *, json: dict[str, object]) -> object:
+            del json
+            return httpx.Response(
+                200,
+                text='{"result":"POLICY_ACTION_ALLOW"}',
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _AllowClient)
+
+
+def test_evaluate_policy_signals_github_activity_on_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PostToolUse ``git push`` fires the GitHub-activity signal to the server.
+
+    The signal is independent of the policy verdict (a best-effort UI freshness
+    nudge), so the policy POST returns ALLOW and the assertion is on the
+    github-activity call resolving the session's server URL, auth headers, and id.
+    """
+    signals: list[tuple[str, dict[str, str], str]] = []
+
+    def _spy(server_url: str, headers: dict[str, str], session_id: str) -> None:
+        signals.append((server_url, dict(headers), session_id))
+
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
+    _install_allow_policy_client(monkeypatch)
+    monkeypatch.setattr(native_policy_hook, "post_github_activity_signal", _spy)
+    bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
+    write_active_session_id(bridge_dir, "conv_active")
+    build_hook_settings(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        ap_auth_headers={"Authorization": "Bearer test-token"},
+    )
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git push origin HEAD"},
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
+
+    assert exit_code == 0
+    assert len(signals) == 1
+    server_url, headers, session_id = signals[0]
+    assert server_url == "http://127.0.0.1:8787"
+    assert session_id == "conv_active"
+    assert headers.get("Authorization") == "Bearer test-token"
+
+
+def test_evaluate_policy_no_github_signal_on_read_only_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only PostToolUse (``git status``) fires no GitHub-activity signal."""
+    signals: list[object] = []
+
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
+    _install_allow_policy_client(monkeypatch)
+    monkeypatch.setattr(
+        native_policy_hook,
+        "post_github_activity_signal",
+        lambda *a, **k: signals.append((a, k)),
+    )
+    bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
+    write_active_session_id(bridge_dir, "conv_active")
+    build_hook_settings(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        ap_auth_headers={"Authorization": "Bearer test-token"},
+    )
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
+
+    assert exit_code == 0
+    assert signals == []
+
+
 def test_evaluate_policy_stamps_live_model_from_context_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -33,6 +33,7 @@ import type {
   ResponseQueued,
   RetryEvent,
   SessionChangedFilesInvalidatedEvent,
+  SessionGithubInvalidatedEvent,
   SessionChildSessionUpdatedEvent,
   SessionModelOptionsEvent,
   SessionCreatedEvent,
@@ -898,6 +899,14 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       sessionId,
       environmentId: typeof data.environment_id === "string" ? data.environment_id : "default",
     } satisfies SessionChangedFilesInvalidatedEvent;
+  }
+  if (eventType === "session.github.invalidated") {
+    const sessionId = data.session_id;
+    if (typeof sessionId !== "string" || !sessionId) return null;
+    return {
+      type: "session_github_invalidated",
+      sessionId,
+    } satisfies SessionGithubInvalidatedEvent;
   }
   if (eventType === "session.terminal.activity") {
     const sessionId = data.session_id;

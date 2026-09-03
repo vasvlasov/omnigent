@@ -1048,9 +1048,11 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     from omnigent.native_policy_hook import (
         evaluation_response_to_hook_output,
         fail_closed_hook_output,
+        github_activity_matched,
         hook_payload_to_evaluation_request,
         policy_hook_reauth,
         post_evaluate_with_retry,
+        post_github_activity_signal,
         read_relay_policy_config,
         relay_policy_evaluate_url,
     )
@@ -1069,6 +1071,22 @@ def _main_evaluate_policy(argv: list[str]) -> int:
     session_id = read_active_session_id(bridge_dir)
     if not session_id:
         return 0
+
+    # Nudge the web to refetch GitHub info when the agent pushes or mutates a PR.
+    # Independent of the policy verdict below and best-effort (the git command
+    # has already run), so it never blocks or fails the hook.
+    if github_activity_matched(payload):
+        gh_config = read_permission_hook_config(bridge_dir)
+        gh_server = gh_config.get("ap_server_url")
+        if isinstance(gh_server, str) and gh_server:
+            from omnigent.cli_auth import databricks_request_headers
+
+            gh_headers: dict[str, str] = {}
+            gh_raw_headers = gh_config.get("ap_auth_headers")
+            if isinstance(gh_raw_headers, dict):
+                gh_headers = {str(k): str(v) for k, v in gh_raw_headers.items()}
+            gh_headers.update(databricks_request_headers(gh_server))
+            post_github_activity_signal(gh_server, gh_headers, session_id)
 
     hook_event = payload.get("hook_event_name", "")
     eval_request = hook_payload_to_evaluation_request(hook_event, payload)

@@ -4409,6 +4409,24 @@ class SessionChangedFilesInvalidatedEvent(_SSEEventBase):
     environment_id: str = "default"
 
 
+class SessionGithubInvalidatedEvent(_SSEEventBase):
+    """
+    The session's GitHub context (PR / branch / CI) may have changed — refetch it.
+
+    A coarse "GitHub may have changed" signal emitted after the agent runs a
+    command that updates the remote or a PR (``git push`` / ``gh pr …``), so the
+    GitHub panel and the composer's PR indicator refresh without waiting on the
+    panel's own poll or a manual Refresh. Transient (not persisted — the REST
+    ``/resources/github`` endpoint stays the source of truth).
+
+    :param type: Always ``"session.github.invalidated"``.
+    :param session_id: Owning session/conversation id.
+    """
+
+    type: Literal["session.github.invalidated"]
+    session_id: str
+
+
 class SessionTerminalActivityEvent(_SSEEventBase):
     """
     A terminal's pane produced output (runner-determined activity pulse).
@@ -4529,6 +4547,7 @@ ServerStreamEvent = Annotated[
     | SessionResourceDeletedEvent
     | SessionChildSessionUpdatedEvent
     | SessionChangedFilesInvalidatedEvent
+    | SessionGithubInvalidatedEvent
     | SessionTerminalActivityEvent
     # ── Transient (SSE-only) — incremental token deltas ────────
     | OutputTextDeltaEvent

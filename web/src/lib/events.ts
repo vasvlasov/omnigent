@@ -817,6 +817,16 @@ export interface SessionChangedFilesInvalidatedEvent {
 }
 
 /**
+ * `session.github.invalidated` — the session's GitHub context (PR / branch /
+ * CI checks) may have changed; the consumer should refetch it. Coarse signal
+ * emitted after the agent pushes or mutates a PR (git push / gh pr …).
+ */
+export interface SessionGithubInvalidatedEvent {
+  type: "session_github_invalidated";
+  sessionId: string;
+}
+
+/**
  * `session.terminal.activity` — a terminal's pane produced output
  * (runner-determined). Drives the "active" badge with no client PTY
  * attach. A transient pulse, not persisted.
@@ -961,6 +971,7 @@ export type StreamEvent =
   | SessionResourceDeletedEvent
   | SessionChildSessionUpdatedEvent
   | SessionChangedFilesInvalidatedEvent
+  | SessionGithubInvalidatedEvent
   | SessionTerminalActivityEvent
   | SessionSkillsEvent
   | SessionModelOptionsEvent

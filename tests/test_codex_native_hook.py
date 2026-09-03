@@ -480,6 +480,84 @@ def test_post_tool_use_fails_open_on_error(
     assert captured.out == ""
 
 
+def test_evaluate_policy_signals_github_activity_on_push(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PostToolUse ``git push`` fires the GitHub-activity signal (Codex).
+
+    The signal runs before (and independent of) the policy POST, so the policy
+    round-trip is left to fail open here and the assertion is on the signal
+    resolving the session's server URL, auth headers, and id.
+    """
+    signals: list[tuple[str, dict[str, str], str]] = []
+    # Codex imports the signal at module load, so patch the name it resolves.
+    monkeypatch.setattr(
+        codex_native_hook,
+        "post_github_activity_signal",
+        lambda server_url, headers, session_id: signals.append(
+            (server_url, dict(headers), session_id)
+        ),
+    )
+    write_policy_hook_config(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        ap_auth_headers={"Authorization": "Bearer test-token"},
+    )
+    monkeypatch.setattr(native_policy_hook, "_EVALUATE_POLICY_RETRY_BUDGET_S", 0.0)
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", make_failing_client("connect_error"))
+
+    exit_code = _run_hook(
+        bridge_dir,
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+        },
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    assert len(signals) == 1
+    server_url, headers, session_id = signals[0]
+    assert server_url == "http://127.0.0.1:8787"
+    assert session_id == "conv_active"
+    assert headers.get("Authorization") == "Bearer test-token"
+
+
+def test_evaluate_policy_no_github_signal_on_read_only_command(
+    bridge_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only PostToolUse (``git status``) fires no GitHub signal (Codex)."""
+    signals: list[object] = []
+    monkeypatch.setattr(
+        codex_native_hook,
+        "post_github_activity_signal",
+        lambda *a, **k: signals.append((a, k)),
+    )
+    write_policy_hook_config(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        ap_auth_headers={"Authorization": "Bearer test-token"},
+    )
+    monkeypatch.setattr(native_policy_hook, "_EVALUATE_POLICY_RETRY_BUDGET_S", 0.0)
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", make_failing_client("connect_error"))
+
+    exit_code = _run_hook(
+        bridge_dir,
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+        },
+        monkeypatch,
+    )
+
+    assert exit_code == 0
+    assert signals == []
+
+
 def test_pre_tool_use_uses_relay_when_tool_relay_json_has_session_id(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

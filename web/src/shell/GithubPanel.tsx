@@ -543,7 +543,9 @@ function SidebarNode({
 
 export function GithubPanel({ conversationId }: { conversationId: string }) {
   const queryClient = useQueryClient();
-  const info = useGithubInfo(conversationId);
+  // Poll for live CI status only while this panel is mounted (the status-line
+  // indicator keeps the non-polling default). Self-limits to unsettled checks.
+  const info = useGithubInfo(conversationId, { poll: true });
   const baseRef = info.data?.base_ref ?? undefined;
   const changes = useGithubChangedFiles(conversationId, baseRef);
   const prDiff = useGithubPrDiff(conversationId, baseRef);

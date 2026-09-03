@@ -458,6 +458,7 @@ from omnigent.server.routes._sessions.helpers import (
     _prune_session_read_state as _prune_session_read_state,
     _publish_and_persist_resource_event as _publish_and_persist_resource_event,
     _publish_changed_files_invalidated as _publish_changed_files_invalidated,
+    _publish_github_invalidated as _publish_github_invalidated,
     _publish_collaboration_mode as _publish_collaboration_mode,
     _publish_compaction_completed as _publish_compaction_completed,
     _publish_compaction_failed as _publish_compaction_failed,

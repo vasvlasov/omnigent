@@ -168,9 +168,18 @@ async function fetchGithubInfo(conversationId: string): Promise<GithubInfo> {
  *
  * Disabled when the runner is known offline. Retries the runner-offline case
  * with capped backoff so a cold-booting runner resolves before any error UI.
- * No polling — the panel refetches on a manual Refresh.
+ *
+ * The default (no `poll`) fetches once and refetches only on an explicit
+ * invalidation — a `git push` / `gh pr` from the agent (see the
+ * `session.github.invalidated` stream event) or a manual Refresh. The
+ * always-mounted status-line indicator uses this default so it never polls.
+ *
+ * Pass `{ poll: true }` (the GitHub panel does) for an adaptive CI poll while
+ * the panel is open: it refetches only while an OPEN PR still has unsettled
+ * checks and stops once they settle — so `gh`'s rate budget isn't spent on
+ * idle sessions or PRs whose checks are already green/red.
  */
-export function useGithubInfo(conversationId: string | undefined) {
+export function useGithubInfo(conversationId: string | undefined, options?: { poll?: boolean }) {
   const serveable = useWorkspaceServeable(conversationId);
   return useQuery({
     queryKey: ["github-info", conversationId],
@@ -179,6 +188,20 @@ export function useGithubInfo(conversationId: string | undefined) {
     retry: shouldRetryRunnerOffline,
     retryDelay: runnerOfflineRetryDelay,
     staleTime: 30_000,
+    // Panel-only adaptive poll for live CI status. Backgrounded tabs pause
+    // (refetchIntervalInBackground: false), and the interval self-terminates
+    // when checks settle / the PR closes so it never polls indefinitely.
+    refetchInterval: options?.poll
+      ? (query) => {
+          const pr = query.state.data?.pr;
+          if (!pr || pr.state !== "OPEN") return false;
+          const { pending, total } = pr.checks;
+          if (pending > 0) return 15_000; // checks running → watch them settle
+          if (total === 0) return 30_000; // PR open, checks not registered yet
+          return false; // all checks settled → stop
+        }
+      : false,
+    refetchIntervalInBackground: false,
   });
 }
 

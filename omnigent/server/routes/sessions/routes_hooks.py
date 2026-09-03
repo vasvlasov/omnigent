@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, NamedTuple
 
 from fastapi import (
@@ -76,6 +77,7 @@ from omnigent.server.routes._sessions.helpers import (
     _forward_session_change_to_runner,
     _get_runner_client,
     _native_ask_gate_lock,
+    _publish_github_invalidated,
     _publish_policy_denied,
     _structured_ask_user_question,
 )
@@ -126,6 +128,15 @@ def _create_route_decision_id(
             if isinstance(decision_id, str) and decision_id:
                 return decision_id
     return None
+
+
+# Coalesce a burst of git-activity hook callbacks into ~one GitHub refetch per
+# short window per session — a multi-push turn shouldn't fan out to many
+# refetches. Leading-edge, keyed by session; mirrors the runner's changed-files
+# signal throttle in ``omnigent.runner.tool_dispatch``.
+_GITHUB_ACTIVITY_THROTTLE_S = 3.0
+_GITHUB_ACTIVITY_MAX_TRACKED = 10_000
+_github_activity_last_signal: dict[str, float] = {}
 
 
 def register_hooks_routes(
@@ -974,6 +985,50 @@ def register_hooks_routes(
             content=json.dumps(resp_body),
             media_type="application/json",
         )
+
+    # ── POST /sessions/{session_id}/hooks/github-activity ─────────
+
+    @router.post(
+        "/sessions/{session_id}/hooks/github-activity",
+        # Internal native-hook callback — hidden from the public API reference.
+        include_in_schema=False,
+        response_model=None,
+        status_code=204,
+    )
+    async def github_activity(
+        request: Request,
+        session_id: str,
+    ) -> Response:
+        """
+        Native-hook signal that the agent ran a remote-mutating git/gh command.
+
+        Claude / Codex ``PostToolUse`` hooks POST here when a shell command
+        pushed to a remote or mutated a PR (``git push`` / ``gh pr …``), so the
+        web can refetch the session's GitHub context (PR / branch / CI) promptly
+        instead of waiting on the panel's poll or a manual Refresh. Purely a UI
+        freshness nudge — it publishes a coarse ``session.github.invalidated``
+        and holds no state. Throttled per session to coalesce a multi-push burst.
+
+        :param request: FastAPI request — the body is ignored.
+        :param session_id: Omnigent conversation id from the URL path.
+        :returns: ``204 No Content``.
+        """
+        from omnigent.server.routes import sessions as _sf
+
+        user_id = _sf._get_user_id(request, auth_provider)
+        # Read access is enough: this only triggers a refetch of data the caller
+        # can already GET, and never mutates session state.
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        now = time.monotonic()
+        last = _github_activity_last_signal.get(session_id, 0.0)
+        if now - last >= _GITHUB_ACTIVITY_THROTTLE_S:
+            if len(_github_activity_last_signal) > _GITHUB_ACTIVITY_MAX_TRACKED:
+                _github_activity_last_signal.clear()
+            _github_activity_last_signal[session_id] = now
+            _publish_github_invalidated(session_id)
+        return Response(status_code=204)
 
     # ── POST /sessions/{session_id}/hooks/codex-elicitation-request ─
 

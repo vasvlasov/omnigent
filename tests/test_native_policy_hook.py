@@ -8,10 +8,13 @@ import pytest
 from omnigent import native_policy_hook
 from omnigent.native_policy_hook import (
     _is_login_redirect_or_unauthorized,
+    command_touches_github_remote,
     evaluation_response_to_hook_output,
     fail_closed_hook_output,
+    github_activity_matched,
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
+    post_github_activity_signal,
 )
 
 
@@ -727,3 +730,126 @@ def test_policy_hook_reauth_returns_none_without_factory(
         "http://127.0.0.1:6767", {"Content-Type": "application/json"}
     )
     assert reauth() is None
+
+
+# ── GitHub freshness signal ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # Pushes update the remote → PR head / CI can change.
+        ("git push", True),
+        ("git push origin HEAD", True),
+        ("git push --force-with-lease", True),
+        ("git -C /repo push", True),
+        ("cd x && git add -A && git commit -m y && git push", True),
+        # PR-mutating gh subcommands.
+        ("gh pr create --fill", True),
+        ("gh pr edit 3 --title x", True),
+        ("gh pr ready", True),
+        ("gh pr merge --squash", True),
+        ("gh pr close 4", True),
+        ("gh pr reopen 4", True),
+        # Read-only / local-only commands must NOT fire a refetch.
+        ("git status", False),
+        ("git diff HEAD~1", False),
+        ("git commit -m 'wip'", False),
+        ("gh pr view", False),
+        ("gh pr list", False),
+        ("echo pushed to remote", False),  # "push" only as a substring, no `git … push`
+        # Accepted over-match: the matcher is a broad `git … push` substring, so a
+        # command that merely mentions a push still fires. Harmless — the cost is
+        # one throttled refetch — and worth it to keep the pattern simple.
+        ("echo git push", True),
+    ],
+)
+def test_command_touches_github_remote(command: str, expected: bool) -> None:
+    """Only remote-affecting git/gh commands trigger a GitHub refetch (broad match)."""
+    assert command_touches_github_remote(command) is expected
+
+
+def test_github_activity_matched_only_on_post_tool_use() -> None:
+    """A push matches only in the PostToolUse (result) phase — the command has run."""
+    push = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git push"},
+    }
+    assert github_activity_matched(push) is True
+    # PreToolUse: the command hasn't run yet, so nothing has changed on the remote.
+    pre = {**push, "hook_event_name": "PreToolUse"}
+    assert github_activity_matched(pre) is False
+
+
+def test_github_activity_matched_ignores_non_shell_and_read_only() -> None:
+    """Non-shell tools carry no command; read-only git commands don't match."""
+    todo = {"hook_event_name": "PostToolUse", "tool_name": "TodoWrite"}
+    assert github_activity_matched(todo) is False
+    read_only = {"hook_event_name": "PostToolUse", "tool_input": {"command": "git status"}}
+    assert github_activity_matched(read_only) is False
+    # Malformed tool_input (not a mapping) is tolerated, not raised on.
+    malformed = {"hook_event_name": "PostToolUse", "tool_input": "git push"}
+    assert github_activity_matched(malformed) is False
+
+
+def _make_recording_client(sink: list[tuple[str, dict[str, str], object]]) -> type:
+    """Build an httpx.Client stub that records ``(url, headers, json)`` per POST."""
+
+    class _Client:
+        def __init__(self, *, timeout: object) -> None:
+            del timeout
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def post(self, url: str, *, headers: dict[str, str], json: object) -> httpx.Response:
+            sink.append((url, dict(headers), json))
+            return httpx.Response(204, request=httpx.Request("POST", url))
+
+    return _Client
+
+
+def test_post_github_activity_signal_posts_to_hook_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The signal POSTs the session's github-activity route with the given headers."""
+    sink: list[tuple[str, dict[str, str], object]] = []
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _make_recording_client(sink))
+    post_github_activity_signal(
+        "https://ap.example.com/",
+        {"Authorization": "Bearer t", "X-Databricks-Org-Id": "o1"},
+        "conv_abc",
+    )
+    assert len(sink) == 1
+    url, headers, body = sink[0]
+    assert url == "https://ap.example.com/v1/sessions/conv_abc/hooks/github-activity"
+    assert headers["Authorization"] == "Bearer t"
+    assert headers["Content-Type"] == "application/json"
+    assert body == {}
+
+
+def test_post_github_activity_signal_swallows_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure never raises — the git command already ran; this is a hint."""
+
+    class _FailingClient:
+        def __init__(self, *, timeout: object) -> None:
+            del timeout
+
+        def __enter__(self) -> _FailingClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def post(self, *args: object, **kwargs: object) -> httpx.Response:
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _FailingClient)
+    # Must not raise.
+    post_github_activity_signal("https://ap.example.com", {}, "conv_abc")

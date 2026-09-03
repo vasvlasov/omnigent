@@ -6161,6 +6161,38 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
     });
   });
 
+  describe("session.github.invalidated", () => {
+    it("coalesces and invalidates the GitHub query caches for the session", async () => {
+      vi.useFakeTimers();
+      const spy = vi.spyOn(client, "invalidateQueries");
+      handleSessionEvent({
+        type: "session_github_invalidated",
+        sessionId: "conv_abc",
+      });
+      handleSessionEvent({
+        type: "session_github_invalidated",
+        sessionId: "conv_abc",
+      });
+      expect(spy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(750);
+
+      expect(spy).toHaveBeenCalledWith({
+        queryKey: ["github-info", "conv_abc"],
+      });
+      expect(spy).toHaveBeenCalledWith({
+        queryKey: ["github-changed-files", "conv_abc"],
+      });
+      expect(spy).toHaveBeenCalledWith({
+        queryKey: ["github-pr-diff", "conv_abc"],
+      });
+      // 3 = the three GitHub keys from ONE debounced flush (the two events
+      // above coalesced). 6 would mean the debounce broke.
+      expect(spy).toHaveBeenCalledTimes(3);
+      spy.mockRestore();
+    });
+  });
+
   describe("session.terminal.activity", () => {
     it("records an activity pulse so the badge can light without an attach", () => {
       const before = useTerminalActivityStore.getState().lastActive["terminal_zsh_s1"];

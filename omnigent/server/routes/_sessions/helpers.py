@@ -4636,6 +4636,27 @@ def _publish_changed_files_invalidated(session_id: str, environment_id: str = "d
     )
 
 
+def _publish_github_invalidated(session_id: str) -> None:
+    """
+    Publish a coarse GitHub-context invalidation to the live stream.
+
+    Tells web clients to refetch the session's GitHub info (PR / branch / CI)
+    instead of relying on the panel's poll or a manual Refresh. Emitted after
+    the agent runs a command that updates the remote or a PR (``git push`` /
+    ``gh pr …``); coarse because the runner can only cheaply answer "GitHub may
+    have changed", not the precise delta.
+
+    :param session_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+    """
+    session_stream.publish(
+        session_id,
+        {
+            "type": "session.github.invalidated",
+            "session_id": session_id,
+        },
+    )
+
+
 def _publish_interrupted(session_id: str, response_id: str | None = None) -> None:
     """
     Publish a ``session.interrupted`` event to the live stream.
@@ -10238,6 +10259,7 @@ __all__ = [
     "_publish_external_output_reasoning_delta",
     "_publish_external_output_text_delta",
     "_publish_external_tool_output_delta",
+    "_publish_github_invalidated",
     "_publish_input_consumed",
     "_publish_input_deny_terminal",
     "_publish_interrupted",
